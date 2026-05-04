@@ -5,8 +5,10 @@ import contextlib
 import asyncio
 import logging
 import json
+import hashlib
+import hmac
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 import uvicorn
 import requests as http_requests
@@ -27,6 +29,7 @@ DEVIN_API_KEY = os.getenv("DEVIN_API_KEY", "")
 DEVIN_API_BASE_URL = os.getenv("DEVIN_API_BASE_URL", "https://api.devinenterprise.com/v1")
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
 DB_PATH = os.getenv("DB_PATH", "tasks.db")
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -280,27 +283,9 @@ def poll_devin_session(task: dict) -> str:
 
 
 async def polling_loop():
+    """Background loop that syncs Devin session statuses. Issue ingestion is handled by the webhook."""
     while True:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
-        try:
-            issues = fetch_open_vulnerability_issues()
-            new_count = sync_issues_to_db(issues)
-            logger.info("Polling cycle complete: %d new tasks", new_count)
-        except Exception:
-            logger.exception("Error during GitHub polling phase")
-
-        # Auto-dispatch pending tasks
-        try:
-            with get_db() as conn:
-                rows = conn.execute("SELECT * FROM tasks WHERE status='pending'").fetchall()
-            pending = [dict(r) for r in rows]
-            for t in pending:
-                create_devin_session(t)
-            if pending:
-                logger.info("Auto-dispatched %d pending tasks", len(pending))
-        except Exception:
-            logger.exception("Error during auto-dispatch phase")
-
         # Sync statuses for running tasks
         try:
             with get_db() as conn:
@@ -348,6 +333,63 @@ def poll():
     issues = fetch_open_vulnerability_issues()
     new_count = sync_issues_to_db(issues)
     return {"new_tasks": new_count, "total_open_issues": len(issues)}
+
+
+@app.post("/webhook/github")
+async def github_webhook(request: Request):
+    """Handle GitHub webhook events for issue creation/labeling."""
+    body = await request.body()
+
+    # Verify HMAC signature if secret is configured
+    if GITHUB_WEBHOOK_SECRET:
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        expected = "sha256=" + hmac.new(
+            GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            logger.warning("Webhook signature verification failed")
+            raise HTTPException(status_code=403, detail="Invalid signature")
+
+    payload = json.loads(body)
+    event = request.headers.get("X-GitHub-Event", "")
+    action = payload.get("action", "")
+
+    # Only handle issue opened or labeled events
+    if event != "issues" or action not in ("opened", "labeled"):
+        return {"status": "ignored", "event": event, "action": action}
+
+    issue = payload.get("issue", {})
+    labels = [label["name"] for label in issue.get("labels", [])]
+
+    if "vulnerability" not in labels:
+        return {"status": "ignored", "reason": "no vulnerability label"}
+
+    # Sync the issue to DB
+    issue_data = {
+        "number": issue["number"],
+        "title": issue["title"],
+        "html_url": issue["html_url"],
+        "body": issue.get("body", ""),
+    }
+    new_count = sync_issues_to_db([issue_data])
+    logger.info("Webhook received for issue #%s: %d new task(s)", issue["number"], new_count)
+
+    # Immediately dispatch if it's a new task
+    dispatched = False
+    if new_count > 0:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE issue_number = ? AND status = 'pending'",
+                (issue["number"],),
+            ).fetchone()
+        if row:
+            dispatched = create_devin_session(dict(row))
+
+    return {
+        "status": "dispatched" if dispatched else "synced",
+        "issue": issue["number"],
+        "new": new_count > 0,
+    }
 
 
 @app.get("/tasks")

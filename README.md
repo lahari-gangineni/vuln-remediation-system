@@ -9,7 +9,7 @@ Security teams find vulnerabilities faster than engineering teams can fix them. 
 
 ## What It Does
 
-- Polls a GitHub repo every 60 seconds for issues with the `vulnerability` label
+- Receives GitHub webhook events when issues with the `vulnerability` label are created, and immediately dispatches remediation
 - Dispatches a Devin session per issue using a generic prompt template
 - Tracks status (`pending` / `running` / `completed` / `failed` / `needs_review`) in SQLite
 - Surfaces live state via `/dashboard` (HTML) and `/api/metrics` (JSON)
@@ -20,14 +20,14 @@ Security teams find vulnerabilities faster than engineering teams can fix them. 
 ```mermaid
 flowchart LR
     Scanner["Security Scanner\n(bandit / pip-audit)"] -->|files issues| GitHub["GitHub Issues\n(vulnerability label)"]
-    GitHub -->|polls every 60s| Orchestrator["Orchestrator\n(FastAPI + SQLite)"]
+    GitHub -->|webhook POST| Orchestrator["Orchestrator\n(FastAPI + SQLite)"]
     Orchestrator -->|POST /sessions| Devin["Devin API"]
     Devin -->|opens PRs| Repo["Target Repo"]
     Orchestrator -->|GET /sessions/:id| Devin
     Orchestrator -->|serves| Dashboard["/dashboard\n/api/metrics"]
 ```
 
-The orchestrator is intentionally **stateless between restarts** aside from its SQLite database. It discovers work by polling (not webhooks) so it can run behind a firewall without inbound connectivity. Each Devin session gets a self-contained prompt with the issue context — no shared state between sessions.
+The orchestrator receives GitHub webhook events for real-time issue ingestion. A background loop continues to poll Devin session statuses. The `/poll` endpoint remains available as a manual fallback. Each Devin session gets a self-contained prompt with the issue context — no shared state between sessions.
 
 ## Dashboard
 
@@ -49,6 +49,7 @@ curl http://localhost:8000/health
 | `GITHUB_REPO` | Target repo in `owner/repo` format |
 | `DEVIN_API_KEY` | Devin Enterprise API key |
 | `POLL_INTERVAL_SECONDS` | Polling frequency (default `60`) |
+| `GITHUB_WEBHOOK_SECRET` | Shared secret for webhook HMAC-SHA256 verification |
 
 ## API
 
@@ -61,6 +62,18 @@ curl http://localhost:8000/health
 | POST | `/sync-statuses` | Poll Devin API for `running` task statuses and update DB |
 | GET | `/dashboard` | HTML dashboard with KPIs and task table |
 | GET | `/api/metrics` | JSON metrics (counts by status, completion/failure rates) |
+| POST | `/webhook/github` | GitHub webhook receiver — ingests issues with `vulnerability` label |
+
+## Webhook Setup
+
+1. Go to your target repo's **Settings > Webhooks > Add webhook**
+2. Set **Payload URL** to `https://your-host/webhook/github`
+3. Set **Content type** to `application/json`
+4. Set **Secret** to match `GITHUB_WEBHOOK_SECRET` in your `.env`
+5. Under "Which events would you like to trigger this webhook?", select **Let me select individual events** and check only **Issues**
+6. Click **Add webhook**
+
+The orchestrator will now receive events instantly when issues are opened or labeled with `vulnerability`. The `/poll` endpoint is still available as a manual fallback.
 
 ## End-to-End Demo
 
@@ -68,21 +81,21 @@ curl http://localhost:8000/health
 # 1. Start the orchestrator
 docker compose up --build
 
-# 2. Poll GitHub for vulnerability issues
-curl -X POST http://localhost:8000/poll
+# 2. Configure the GitHub webhook (see Webhook Setup above)
 
-# 3. Dispatch pending tasks to Devin
-curl -X POST http://localhost:8000/dispatch
+# 3. Create a GitHub issue with the "vulnerability" label
+#    The webhook fires, the orchestrator syncs and dispatches automatically
 
-# 4. Wait a few minutes, then sync statuses
-curl -X POST http://localhost:8000/sync-statuses
-
-# 5. View results
+# 4. Check status
 curl http://localhost:8000/tasks | jq
 open http://localhost:8000/dashboard
+
+# 5. Manual fallback: poll GitHub directly if needed
+curl -X POST http://localhost:8000/poll
+curl -X POST http://localhost:8000/dispatch
 ```
 
-Or just let it run — the background loop polls, dispatches, and syncs automatically every 60 seconds.
+The background loop syncs Devin session statuses every 60 seconds automatically.
 
 ## Project Structure
 
