@@ -7,6 +7,7 @@ import logging
 import json
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 import uvicorn
 import requests as http_requests
 from dotenv import load_dotenv
@@ -403,6 +404,122 @@ def sync_statuses():
         "failed": failed,
         "needs_review": needs_review,
     }
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+    tasks = [dict(r) for r in rows]
+
+    counts = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "needs_review": 0}
+    for t in tasks:
+        s = t.get("status", "pending")
+        counts[s] = counts.get(s, 0) + 1
+
+    status_emoji = {
+        "pending": "⏳",
+        "running": "🔄",
+        "completed": "✅",
+        "failed": "❌",
+        "needs_review": "👀",
+    }
+
+    task_rows = ""
+    for t in tasks:
+        s = t["status"]
+        badge = status_emoji.get(s, "")
+        issue_link = f'<a href="{t["issue_url"]}" target="_blank">#{t["issue_number"]}</a>'
+        session_link = (
+            f'<a href="{t["devin_session_url"]}" target="_blank">{t["devin_session_id"][:8]}…</a>'
+            if t.get("devin_session_url") and t.get("devin_session_id")
+            else "—"
+        )
+        pr_link = (
+            f'<a href="{t["pr_url"]}" target="_blank">View PR</a>'
+            if t.get("pr_url")
+            else "—"
+        )
+        error = t.get("error_message") or ""
+        if len(error) > 80:
+            error = error[:80] + "…"
+        updated = t.get("updated_at", "")[:19].replace("T", " ")
+        task_rows += (
+            f"<tr>"
+            f"<td>{issue_link}</td>"
+            f"<td>{t['issue_title']}</td>"
+            f"<td>{badge} {s}</td>"
+            f"<td>{session_link}</td>"
+            f"<td>{pr_link}</td>"
+            f"<td><small>{error}</small></td>"
+            f"<td><small>{updated}</small></td>"
+            f"</tr>\n"
+        )
+
+    html = f"""\
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vuln Remediation Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    .kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
+    .kpi {{ text-align: center; padding: 1rem; border-radius: var(--pico-border-radius); background: var(--pico-card-background-color); }}
+    .kpi strong {{ font-size: 2rem; display: block; }}
+    table {{ font-size: .9rem; }}
+    .actions {{ display: flex; gap: .5rem; margin-bottom: 1.5rem; }}
+  </style>
+</head>
+<body>
+<main class="container">
+  <hgroup>
+    <h1>Vulnerability Remediation</h1>
+    <p>Orchestrator dashboard &mdash; {len(tasks)} total tasks</p>
+  </hgroup>
+
+  <div class="kpi-grid">
+    <article class="kpi"><strong>{counts["pending"]}</strong>Pending</article>
+    <article class="kpi"><strong>{counts["running"]}</strong>Running</article>
+    <article class="kpi"><strong>{counts["completed"]}</strong>Completed</article>
+    <article class="kpi"><strong>{counts["failed"]}</strong>Failed</article>
+    <article class="kpi"><strong>{counts["needs_review"]}</strong>Needs Review</article>
+  </div>
+
+  <div class="actions">
+    <button id="btn-poll" onclick="post('/poll')">Poll GitHub</button>
+    <button id="btn-dispatch" class="secondary" onclick="post('/dispatch')">Dispatch Pending</button>
+    <button id="btn-sync" class="contrast" onclick="post('/sync-statuses')">Sync Statuses</button>
+  </div>
+
+  <figure>
+  <table role="grid">
+    <thead>
+      <tr>
+        <th>Issue</th><th>Title</th><th>Status</th>
+        <th>Devin Session</th><th>PR</th><th>Error</th><th>Updated</th>
+      </tr>
+    </thead>
+    <tbody>
+      {task_rows if task_rows else '<tr><td colspan="7">No tasks yet. Click <b>Poll GitHub</b> to fetch vulnerability issues.</td></tr>'}
+    </tbody>
+  </table>
+  </figure>
+</main>
+<script>
+async function post(url) {{
+  try {{
+    const r = await fetch(url, {{method:'POST'}});
+    const d = await r.json();
+    alert(JSON.stringify(d, null, 2));
+    location.reload();
+  }} catch(e) {{ alert('Error: ' + e); }}
+}}
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 if __name__ == "__main__":
