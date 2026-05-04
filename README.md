@@ -84,17 +84,6 @@ open http://localhost:8000/dashboard
 
 Or just let it run — the background loop polls, dispatches, and syncs automatically every 60 seconds.
 
-## Design Decisions
-
-| Decision | Rationale |
-|---|---|
-| **Polling over webhooks** | Simpler deployment; works behind firewalls without ngrok or public endpoints. Polling interval is configurable. |
-| **SQLite over Postgres** | Single-file database with zero ops overhead. Sufficient for the task volume of a single-repo orchestrator. Swappable later via the `DB_PATH` env var. |
-| **One Devin session per issue** | Each session gets a self-contained prompt with full issue context. No shared state means sessions can't interfere with each other, and failures are isolated. |
-| **Generic prompt template** | The same prompt structure works for any vulnerability type — bandit rules, CVEs, unsafe imports. Devin reads the issue body for specifics. |
-| **Status as a finite state machine** | `pending → running → completed / failed / needs_review`. Clear transitions make the dashboard and metrics reliable. |
-| **No authentication on dashboard** | Designed for internal / localhost use. Add a reverse proxy (Caddy, nginx) with auth for production exposure. |
-
 ## Project Structure
 
 ```
@@ -115,9 +104,3 @@ Or just let it run — the background loop polls, dispatches, and syncs automati
 - **Docker Compose** — single-command deployment
 - **Pico CSS** — classless CSS framework for the dashboard UI
 
-## Limitations & Next Steps
-
-- **Detection trigger is currently external.** A scheduled `pip-audit`/`bandit` runner that auto-files issues from raw scanner output would close the upstream loop end-to-end.
-- **No retry policy.** Failed Devin sessions stay failed. Backoff + retry would help with transient API errors.
-- **No PR auto-review.** A second Devin session reviewing the first one's PR would catch quality issues before human review.
-- **Single-repo orchestrator.** Currently watches one `GITHUB_REPO`. A multi-tenant version would support fleets of repos.
