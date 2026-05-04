@@ -114,3 +114,10 @@ Or just let it run — the background loop polls, dispatches, and syncs automati
 - **SQLite** — embedded task store
 - **Docker Compose** — single-command deployment
 - **Pico CSS** — classless CSS framework for the dashboard UI
+
+## Limitations & Next Steps
+
+- **Detection trigger is currently external.** A scheduled `pip-audit`/`bandit` runner that auto-files issues from raw scanner output would close the upstream loop end-to-end.
+- **No retry policy.** Failed Devin sessions stay failed. Backoff + retry would help with transient API errors.
+- **No PR auto-review.** A second Devin session reviewing the first one's PR would catch quality issues before human review.
+- **Single-repo orchestrator.** Currently watches one `GITHUB_REPO`. A multi-tenant version would support fleets of repos.
