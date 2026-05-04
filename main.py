@@ -406,6 +406,27 @@ def sync_statuses():
     }
 
 
+@app.get("/api/metrics")
+def api_metrics():
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+    tasks = [dict(r) for r in rows]
+
+    counts = {"pending": 0, "running": 0, "completed": 0, "failed": 0, "needs_review": 0}
+    for t in tasks:
+        s = t.get("status", "pending")
+        counts[s] = counts.get(s, 0) + 1
+
+    total = len(tasks)
+    return {
+        "total": total,
+        "by_status": counts,
+        "completion_rate": round(counts["completed"] / total * 100, 1) if total else 0.0,
+        "failure_rate": round(counts["failed"] / total * 100, 1) if total else 0.0,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
     with get_db() as conn:
